@@ -13,6 +13,7 @@ from pydantic import AnyUrl
 from starlette.testclient import TestClient
 
 from claude_connector_kit import LoginRefused, Provider, Store, add_login, auth_settings
+from claude_connector_kit.login import RateLimiter
 from claude_connector_kit.oauth import MAX_LOGIN_FAILURES
 from claude_connector_kit.signin import sign_in
 
@@ -165,6 +166,45 @@ def test_a_code_exchanged_after_its_session_ended_yields_no_working_grant(provid
     assert store.end_session("paul@x.test") is True
     tok = run(p.exchange_authorization_code(client, run(p.load_authorization_code(client, code))))
     assert run(p.load_access_token(tok.access_token)) is None
+    assert run(p.load_refresh_token(client, tok.refresh_token)) is None
+
+
+def test_a_refresh_exchanged_after_its_session_ended_yields_no_working_grant(provider, client):
+    # the session ends between the token handler's load and its exchange
+    p, store = provider
+    token = signed_in(p, client)
+    loaded = run(p.load_refresh_token(client, token.refresh_token))
+    assert store.end_session("paul@x.test", "1-aaaa") is True
+    rotated = run(p.exchange_refresh_token(client, loaded, []))
+    assert run(p.load_access_token(rotated.access_token)) is None
+    assert run(p.load_refresh_token(client, rotated.refresh_token)) is None
+
+
+def test_a_grant_seen_without_a_session_is_deleted_not_suspended(provider, client):
+    p, store = provider
+    token = signed_in(p, client)
+    store.delete("sessions", "paul@x.test")   # the session gone, the grant rows left
+    assert run(p.load_access_token(token.access_token)) is None
+    assert run(p.load_refresh_token(client, token.refresh_token)) is None
+    signed_in(p, client)
+    assert run(p.load_access_token(token.access_token)) is None
+    assert run(p.load_refresh_token(client, token.refresh_token)) is None
+
+
+def test_revoking_one_grant_ends_the_others_that_share_its_session(provider, client):
+    p, store = provider
+    first = signed_in(p, client)
+    second = signed_in(p, client)
+    run(p.revoke_token(run(p.load_access_token(second.access_token))))
+    signed_in(p, client)   # a later sign-in does not bring the first grant back
+    assert run(p.load_refresh_token(client, first.refresh_token)) is None
+
+
+def test_the_pending_client_is_shown_for_consent(provider, client):
+    p, _ = provider
+    req = run(p.authorize(client, params())).split("req=")[1]
+    assert p.pending_client(req).client_id == client.client_id
+    assert p.pending_client("nope") is None
 
 
 def test_parallel_reads_of_the_session_are_right(provider, client):
@@ -270,6 +310,21 @@ def test_every_registered_client_can_revoke_its_own_token(tmp_path, auth_method)
         form["client_secret"] = info.client_secret
     assert http.post("/revoke", data=form, auth=auth).status_code == 200
     assert p.store.get("refresh", token["refresh_token"]) is None
+    assert p.store.session("paul@x.test") is None
+
+
+def test_a_secret_client_still_cannot_revoke_without_its_secret(tmp_path):
+    http, p = app(tmp_path)
+    info = register(http, "client_secret_post")
+    req = run(p.authorize(info, params(CHALLENGE))).split("req=")[1]
+    code = p.complete_login(req, "paul@x.test", "right").split("code=")[1].split("&")[0]
+    token = http.post("/token", data={
+        "grant_type": "authorization_code", "code": code, "code_verifier": VERIFIER,
+        "redirect_uri": "https://client.test/cb", "client_id": info.client_id,
+        "client_secret": info.client_secret}).json()
+    got = http.post("/revoke", data={"token": token["refresh_token"], "client_id": info.client_id})
+    assert got.status_code == 401
+    assert p.store.get("refresh", token["refresh_token"]) is not None
 
 
 def test_the_metadata_names_public_clients_for_token_and_revoke(tmp_path):
@@ -277,6 +332,7 @@ def test_the_metadata_names_public_clients_for_token_and_revoke(tmp_path):
     meta = http.get("/.well-known/oauth-authorization-server").json()
     assert "none" in meta["token_endpoint_auth_methods_supported"]
     assert "none" in meta["revocation_endpoint_auth_methods_supported"]
+    assert "client_secret_post" in meta["revocation_endpoint_auth_methods_supported"]
 
 
 def test_the_login_page_cannot_be_framed(tmp_path):
@@ -302,3 +358,40 @@ def test_wrong_passwords_from_many_addresses_share_one_budget(tmp_path):
     got = http.post("/login", data={"req": req, "password": "right"}, headers={"x-real-ip": "192.0.2.1"},
                     follow_redirects=False)
     assert got.status_code == 429   # spent for the hour: sign-in waits, grants already made work on
+
+
+def test_with_many_logins_the_limits_are_per_address_and_per_address_and_login(tmp_path):
+    http, p = app(tmp_path)
+    info = register(http)
+
+    def attempt(ip, login, password="wrong"):
+        req = run(p.authorize(info, params(CHALLENGE))).split("req=")[1]
+        return http.post("/login", data={"req": req, "login": login, "password": password},
+                         headers={"x-real-ip": ip}, follow_redirects=False).status_code
+    assert [attempt("192.0.2.1", "paul@x.test") for _ in range(7)] == [401] * 6 + [429]
+    assert attempt("192.0.2.1", "sam@x.test") == 401   # another login from the same address
+    assert attempt("192.0.2.2", "paul@x.test", "right") == 302   # no budget shared across addresses
+    assert [attempt(f"2001:db8::{n:x}", "paul@x.test") for n in range(31)] == [401] * 31
+
+
+def test_the_limiter_blocks_past_the_limit_then_recovers_after_the_window():
+    rl = RateLimiter(limit=3, window=1)
+    assert all(rl.allow("k") for _ in range(3))
+    assert not rl.allow("k") and rl.blocked("k")
+    time.sleep(1.05)
+    assert not rl.blocked("k") and rl.allow("k")
+
+
+def test_the_limiter_sweeps_expired_keys():
+    rl = RateLimiter(limit=5, window=1)
+    rl.allow("a")
+    rl._hits["a"] = [time.time() - 10]
+    rl._last_sweep = 0
+    rl.allow("b")
+    assert "a" not in rl._hits
+
+
+def test_the_limiter_caps_its_table_against_a_spray_of_fresh_keys():
+    rl = RateLimiter(limit=2, window=300, max_keys=10)
+    admitted = sum(1 for i in range(100) if rl.allow(f"login-{i}"))
+    assert len(rl._hits) <= 10 and admitted <= 10
