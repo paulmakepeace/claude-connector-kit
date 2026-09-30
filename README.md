@@ -6,8 +6,7 @@ so adding the connector is a URL and a password, and tool registration shaped
 for what a Claude client actually shows the model.
 
 It sits on the official MCP Python SDK (`mcp` 2.x) and adds no framework of
-its own. Used by the Zero console dongle's hub (zongle) and the Cowork
-connector.
+its own.
 
 ## What a Claude client shows the model
 
