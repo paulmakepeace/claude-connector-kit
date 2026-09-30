@@ -40,6 +40,12 @@ class RateLimiter:
         self._hits = {k: live for k, ts in self._hits.items()
                       if (live := [t for t in ts if now - t < self.window])}
 
+    def blocked(self, key: str) -> bool:
+        """Whether `key` has used its budget, without spending any of it."""
+        now = time.time()
+        with self._lock:
+            return len([t for t in self._hits.get(key, []) if now - t < self.window]) >= self.limit
+
     def allow(self, key: str) -> bool:
         now = time.time()
         with self._lock:
@@ -60,7 +66,9 @@ class RateLimiter:
 def client_ip(request: Request) -> str:
     """The real client IP. Behind an nginx front door every request carries the
     proxy's own address as request.client, so trust the X-Real-IP the vhost sets;
-    fall back to the socket peer for a direct or loopback call."""
+    fall back to the socket peer for a direct or loopback call. A caller that
+    reaches the app's own port directly can set the header; that is the LAN,
+    and the failure budget below does not read it."""
     return (request.headers.get("x-real-ip")
             or (request.client.host if request.client else "?"))
 
@@ -73,9 +81,12 @@ def add_login(server: MCPServer, provider: Provider, *, what: str,
     anything else is a failure of its own. With `fixed_login` the form asks only for
     the password and signs in as that login, for a connector with one person."""
     # Two windows: a total per-IP cap (bounds spray and check_login volume from one
-    # source) and a tighter per-IP-and-login cap (bounds targeted guessing).
+    # source) and a tighter per-IP-and-login cap (bounds targeted guessing). With one
+    # login, addresses are cheap (an IPv6 /64), so wrong passwords also share one budget
+    # across every address; while it is spent, sign-in waits, and existing grants work on.
     by_ip = RateLimiter(limit=30, window=300)
     by_login = RateLimiter(limit=6, window=300)
+    failures = RateLimiter(limit=30, window=3600)
 
     def relying_party(req: str) -> tuple[str, str]:
         """The client name and redirect host to show, so the person sees who they are
@@ -112,26 +123,36 @@ def add_login(server: MCPServer, provider: Provider, *, what: str,
         if request.method == "GET":
             req = request.query_params.get("req", "")
             if provider.pending(req) is None:
-                return HTMLResponse(_page(what, "This sign-in link has expired. Start again from your client."),
-                                    status_code=400)
-            return HTMLResponse(form(req))
+                return _html(_page(what, "This sign-in link has expired. Start again from your client."), 400)
+            return _html(form(req))
         data = await request.form()
         req = str(data.get("req", ""))
         login_name = fixed_login or str(data.get("login", "")).strip()
         password = str(data.get("password", ""))
         ip = client_ip(request)
-        if not by_ip.allow(ip) or not by_login.allow(f"{ip}|{login_name}"):
-            return HTMLResponse(_page(what, "Too many attempts. Wait a few minutes and start again."),
-                                status_code=429)
+        if (fixed_login and failures.blocked(fixed_login)) or not by_ip.allow(ip) \
+                or not by_login.allow(f"{ip}|{login_name}"):
+            return _html(_page(what, "Too many attempts. Wait a few minutes and start again."), 429)
         try:
             redirect = await anyio.to_thread.run_sync(provider.complete_login, req, login_name, password)
         except refused:
-            return HTMLResponse(form(req, "That password was not accepted." if fixed_login
-                                     else "That login or password was not accepted."), status_code=401)
+            if fixed_login:
+                failures.allow(fixed_login)
+            return _html(form(req, "That password was not accepted." if fixed_login
+                              else "That login or password was not accepted."), 401)
         except Exception:
             log.warning("login failed for a non-credential reason", exc_info=True)
-            return HTMLResponse(_page(what, "Sign-in failed. Start again from your client."), status_code=400)
+            return _html(_page(what, "Sign-in failed. Start again from your client."), 400)
         return RedirectResponse(redirect, status_code=302)
+
+
+# The page takes a password, so no other site may frame it over an autofilled field.
+NO_FRAME = {"X-Frame-Options": "DENY", "Content-Security-Policy": "frame-ancestors 'none'",
+            "Cache-Control": "no-store"}
+
+
+def _html(body: str, status: int = 200) -> HTMLResponse:
+    return HTMLResponse(body, status_code=status, headers=NO_FRAME)
 
 
 def _page(what: str, body: str) -> str:

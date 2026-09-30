@@ -18,6 +18,7 @@ an optional argument written `anyOf: [X, null]`, type and all. So:
 from __future__ import annotations
 
 import functools
+import inspect
 import json
 from collections.abc import Callable
 from typing import Any
@@ -39,10 +40,10 @@ def writes(*, destructive: bool, idempotent: bool) -> ToolAnnotations:
                            idempotent_hint=idempotent, open_world_hint=False)
 
 
-def about(text: str) -> Any:
+def about(text: str, **bounds: Any) -> Any:
     """An argument's description, shown on the argument in the tool's schema:
-    `since: Annotated[str | None, about("...")] = None`."""
-    return Field(description=text)
+    `since: Annotated[str | None, about("...")] = None`. bounds are Field's, e.g. ge=1."""
+    return Field(description=text, **bounds)
 
 
 def result(data: dict[str, Any]) -> CallToolResult:
@@ -58,12 +59,20 @@ def tool(server: MCPServer, title: str, annotations: ToolAnnotations,
     as described in this module's docstring. The function's docstring is its description,
     published with its source indentation collapsed."""
     def register(fn: Callable) -> Callable:
-        @functools.wraps(fn)
-        def wrapped(*args: Any, **kwargs: Any) -> Any:
-            try:
-                return fn(*args, **kwargs)
-            except errors as exc:
-                raise ToolError(str(exc)) from exc
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def wrapped(*args: Any, **kwargs: Any) -> Any:
+                try:
+                    return await fn(*args, **kwargs)
+                except errors as exc:
+                    raise ToolError(str(exc)) from exc
+        else:
+            @functools.wraps(fn)
+            def wrapped(*args: Any, **kwargs: Any) -> Any:
+                try:
+                    return fn(*args, **kwargs)
+                except errors as exc:
+                    raise ToolError(str(exc)) from exc
         server.tool(title=title, annotations=annotations)(wrapped)
         t = server._tool_manager.get_tool(fn.__name__)
         t.description = " ".join((t.description or "").split())

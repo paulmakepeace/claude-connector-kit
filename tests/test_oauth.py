@@ -277,3 +277,28 @@ def test_the_metadata_names_public_clients_for_token_and_revoke(tmp_path):
     meta = http.get("/.well-known/oauth-authorization-server").json()
     assert "none" in meta["token_endpoint_auth_methods_supported"]
     assert "none" in meta["revocation_endpoint_auth_methods_supported"]
+
+
+def test_the_login_page_cannot_be_framed(tmp_path):
+    http, p = app(tmp_path, fixed_login="owner")
+    info = register(http)
+    req = run(p.authorize(info, params(CHALLENGE))).split("req=")[1]
+    page = http.get("/login", params={"req": req})
+    assert page.headers["x-frame-options"] == "DENY"
+    assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+
+
+def test_wrong_passwords_from_many_addresses_share_one_budget(tmp_path):
+    http, p = app(tmp_path, fixed_login="owner")
+    info = register(http)
+    codes = []
+    for n in range(31):   # each from its own address, so only the shared budget can stop them
+        req = run(p.authorize(info, params(CHALLENGE))).split("req=")[1]
+        got = http.post("/login", data={"req": req, "password": "wrong"}, headers={"x-real-ip": f"2001:db8::{n:x}"},
+                        follow_redirects=False)
+        codes.append(got.status_code)
+    assert codes[:30] == [401] * 30 and codes[30] == 429
+    req = run(p.authorize(info, params(CHALLENGE))).split("req=")[1]
+    got = http.post("/login", data={"req": req, "password": "right"}, headers={"x-real-ip": "192.0.2.1"},
+                    follow_redirects=False)
+    assert got.status_code == 429   # spent for the hour: sign-in waits, grants already made work on

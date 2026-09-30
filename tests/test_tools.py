@@ -65,3 +65,28 @@ def test_the_result_is_compact_text_and_the_same_data_structured(server):
     got = run(server.call_tool("echo", {"word": "ab", "times": 2}))
     assert got.content[0].text == '{"word":"abab"}'
     assert got.structured_content == {"word": "abab"}
+
+
+def test_an_async_tool_is_awaited_and_its_named_error_passes(server):
+    @tool(server, "Later", READS, errors=(ValueError,))
+    async def later(word: Annotated[str, about("a word")]) -> dict:
+        """Echo a word, later."""
+        if word == "bad":
+            raise ValueError("bad later")
+        return result({"word": word})
+    assert run(server.call_tool("later", {"word": "ok"})).structured_content == {"word": "ok"}
+    with pytest.raises(ToolError, match="bad later"):
+        run(server.call_tool("later", {"word": "bad"}))
+
+
+def test_bounds_on_an_argument_are_published_and_enforced():
+    s = MCPServer("b")
+
+    @tool(s, "Bounded", READS)
+    def bounded(limit: Annotated[int, about("how many", ge=1, le=10)] = 5) -> dict:
+        """Bounded."""
+        return result({"limit": limit})
+    assert model_view(s)[0]["input_schema"]["properties"]["limit"] == {
+        "type": "integer", "description": "how many", "minimum": 1, "maximum": 10, "default": 5}
+    with pytest.raises(ToolError):
+        run(s.call_tool("bounded", {"limit": 0}))

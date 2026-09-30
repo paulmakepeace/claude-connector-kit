@@ -77,7 +77,10 @@ class LoginRefused(Exception):
 
 class Store:
     """One SQLite file, JSON rows. Small by construction: a handful of clients, one
-    grant per device, one session per person."""
+    grant per device, one session per person. Tokens are kept as issued, not hashed:
+    the file sits on the connector's own volume beside data the tokens open anyway.
+    The chmod below covers the WAL files only when they exist at open; the volume's
+    owner-only directory is what keeps them private."""
 
     # A sessions row may be a live backend credential, so the file and its WAL
     # sidecars can hold real secrets: keep it owner-only.
@@ -174,6 +177,9 @@ class Provider(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken,
         return OAuthClientInformationFull.model_validate(row) if row else None
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        # Open to any redirect URI, as a client's own is not known in advance; the login
+        # page names the host a grant will go to before it takes a password. Client rows
+        # are a few hundred bytes and are not swept.
         self.store.put("clients", client_info.client_id, client_info.model_dump(mode="json"))
 
     # ----------------------------------------------------------- authorize
