@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-connector-kit"
-version = "0.1.1"
+version = "0.1.2"
 description = "An OAuth 2.1 server and tool registration for MCP connectors used from Claude clients"
 readme = "README.md"
 license = "MIT"

@@ -5,7 +5,7 @@ import threading
 import time
 
 import pytest
-from mcp.server.auth.provider import AuthorizationParams
+from mcp.server.auth.provider import AuthorizationParams, RegistrationError
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.auth import OAuthClientInformationFull
@@ -14,7 +14,7 @@ from starlette.testclient import TestClient
 
 from claude_connector_kit import LoginRefused, Provider, Store, add_login, auth_settings
 from claude_connector_kit.login import RateLimiter
-from claude_connector_kit.oauth import MAX_LOGIN_FAILURES
+from claude_connector_kit.oauth import CLIENT_IDLE, MAX_LOGIN_FAILURES, MAX_REGISTRATIONS_PER_HOUR
 from claude_connector_kit.signin import sign_in
 
 URL = "https://kit.example.test"
@@ -139,6 +139,56 @@ def test_gc_sweeps_expired_rows(provider, client):
     store._last_gc = 0
     store.gc(interval=0)
     assert store.get("pending", req) is None
+
+
+def registered(p, client_id, issued_at):
+    info = OAuthClientInformationFull(client_id=client_id, client_id_issued_at=issued_at,
+                                      redirect_uris=[AnyUrl("https://client.test/cb")])
+    run(p.register_client(info))
+    return info
+
+
+def sweep(store):
+    store._last_gc = 0
+    store.gc(interval=0)
+
+
+def test_gc_sweeps_a_client_idle_past_the_window_with_no_grant(provider):
+    p, store = provider
+    old = int(time.time()) - CLIENT_IDLE - 60
+    registered(p, "idle", old)
+    registered(p, "recent", int(time.time()))
+    registered(p, "unstamped", None)
+    sweep(store)
+    assert store.get("clients", "idle") is None
+    assert store.get("clients", "recent") is not None
+    assert store.get("clients", "unstamped") is not None
+
+
+def test_gc_keeps_an_old_client_that_holds_a_grant_or_had_one_lately(provider):
+    p, store = provider
+    old = int(time.time()) - CLIENT_IDLE - 60
+    granted = registered(p, "granted", old)
+    signed_in(p, granted)
+    mid_login = registered(p, "mid-login", old)
+    run(p.authorize(mid_login, params()))
+    lapsed = registered(p, "lapsed", old)
+    signed_in(p, lapsed)
+    store.end_session("paul@x.test")  # every grant goes; lapsed was granted just now
+    sweep(store)
+    assert store.get("clients", "mid-login") is not None
+    assert store.get("clients", "lapsed") is not None
+    assert store.get("clients", "granted") is not None
+
+
+def test_registration_is_refused_past_the_hourly_limit(provider):
+    p, store = provider
+    now = int(time.time())
+    for n in range(MAX_REGISTRATIONS_PER_HOUR):
+        registered(p, f"c{n}", now)
+    with pytest.raises(RegistrationError):
+        registered(p, "one-too-many", now)
+    assert store.get("clients", "one-too-many") is None
 
 
 def test_ending_a_session_ends_its_grants_for_good(provider, client):

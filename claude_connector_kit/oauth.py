@@ -32,6 +32,7 @@ from mcp.server.auth.provider import (
     AuthorizeError,
     OAuthAuthorizationServerProvider,
     RefreshToken,
+    RegistrationError,
     TokenError,
     construct_redirect_uri,
 )
@@ -69,6 +70,12 @@ REFRESH_TTL = 90 * 24 * 60 * 60
 CODE_TTL = 10 * 60
 LOGIN_TTL = 15 * 60
 MAX_LOGIN_FAILURES = 5  # one pending request cannot drive more than this many guesses
+# A client that holds no grant and has had none for this long is swept. A client registers
+# on every connect, so most rows are left behind by a reconnect and never used again.
+CLIENT_IDLE = 7 * 24 * 60 * 60
+# /register is anonymous; this many registrations an hour, across all callers, is far
+# beyond ordinary connects and bounds what a stranger can add.
+MAX_REGISTRATIONS_PER_HOUR = 30
 
 
 class LoginRefused(Exception):
@@ -118,17 +125,33 @@ class Store:
             self.db.execute(f"DELETE FROM {table} WHERE k = ?", (key,))
 
     def gc(self, interval: int = 300) -> None:
-        """Sweep every expired row. Throttled so a burst of writes triggers it at most
-        once per interval; without it the expiring tables grow without bound under
-        anonymous /authorize and /register traffic."""
+        """Sweep every expired row, then every client that no row in a grant table names
+        and that has had no grant for CLIENT_IDLE. Throttled so a burst of writes triggers
+        it at most once per interval; without it the tables grow without bound under
+        anonymous /authorize and /register traffic. A client row with no issue time is
+        never swept."""
         now = int(time.time())
         if now - self._last_gc < interval:
             return
         self._last_gc = now
+        held = " UNION ".join(
+            f"SELECT json_extract(v, '$.client_id') FROM {table} "
+            f"WHERE json_extract(v, '$.client_id') IS NOT NULL" for table in self.EXPIRING)
         with self._lock:
             for table in self.EXPIRING:
                 self.db.execute(
                     f"DELETE FROM {table} WHERE json_extract(v, '$.expires_at') < ?", (now,))
+            self.db.execute(
+                "DELETE FROM clients WHERE COALESCE(json_extract(v, '$.last_grant_at'), "
+                f"json_extract(v, '$.client_id_issued_at')) < ? AND k NOT IN ({held})",
+                (now - CLIENT_IDLE,))
+
+    def registered_since(self, since: int) -> int:
+        """How many clients were registered at or after `since`."""
+        with self._lock:
+            return self.db.execute(
+                "SELECT COUNT(*) FROM clients WHERE json_extract(v, '$.client_id_issued_at') >= ?",
+                (since,)).fetchone()[0]
 
     # Sessions: the credential check_login returned for a subject, replaced at every sign-in.
     def session(self, subject: str) -> str | None:
@@ -178,8 +201,12 @@ class Provider(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken,
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         # Open to any redirect URI, as a client's own is not known in advance; the login
-        # page names the host a grant will go to before it takes a password. Client rows
-        # are a few hundred bytes and are not swept.
+        # page names the host a grant will go to before it takes a password. Store.gc
+        # sweeps the clients left with no grant.
+        self.store.gc()
+        if self.store.registered_since(_now() - 3600) >= MAX_REGISTRATIONS_PER_HOUR:
+            raise RegistrationError(error="invalid_client_metadata",
+                                    error_description="too many registrations; try again later")
         self.store.put("clients", client_info.client_id, client_info.model_dump(mode="json"))
 
     # ----------------------------------------------------------- authorize
@@ -258,6 +285,9 @@ class Provider(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken,
                resource: str | None) -> OAuthToken:
         access = secrets.token_urlsafe(32)
         refresh = secrets.token_urlsafe(32)
+        client = self.store.get("clients", client_id)
+        if client is not None:
+            self.store.put("clients", client_id, {**client, "last_grant_at": _now()})
         self.store.put("access", access, AccessToken(
             token=access, client_id=client_id, scopes=scopes, expires_at=_now() + ACCESS_TTL,
             resource=resource, subject=subject).model_dump(mode="json"))
