@@ -19,6 +19,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse
 from starlette.routing import Route
 
+DESCRIPTION_LIMIT = 2048
 HINTS = ("read_only_hint", "destructive_hint", "idempotent_hint", "open_world_hint")
 
 
@@ -76,8 +77,9 @@ def landing_route(page: str, path: str = "/") -> Route:
 def check_server(server: MCPServer, *, no_output: Iterable[str] = ()) -> list[str]:
     """What `server` leaves out that a client or a scorecard looks for, one string per gap;
     empty means conformant. Checked: title, description, version, website and an icon with a
-    size; for each tool a description, all four boolean hints, a description on every input
-    argument, and an output schema unless the tool is named in `no_output`. A tool gets an
+    size; for each tool a title, a description within Claude Code's 2,048-character cut, all
+    four boolean hints (read-only and destructive together contradict), a description on every
+    input argument, and an output schema unless the tool is named in `no_output`. A tool gets an
     output schema from a return annotation that is a model, `str` or a list, or
     `Annotated[CallToolResult, Model]`; `-> dict`, `-> CallToolResult` and no annotation
     give none."""
@@ -95,11 +97,18 @@ def check_server(server: MCPServer, *, no_output: Iterable[str] = ()) -> list[st
     for name in sorted(exempt - names):
         problems.append(f"no_output names {name}, which is not a tool")
     for t in tools:
+        if not (t.title or "").strip():
+            problems.append(f"{t.name} has no title")
         if not (t.description or "").strip():
             problems.append(f"{t.name} has no description")
+        elif len(t.description) > DESCRIPTION_LIMIT:
+            problems.append(f"{t.name} description is {len(t.description)} characters, "
+                            f"and Claude Code cuts it at {DESCRIPTION_LIMIT}")
         for hint in HINTS:
             if not isinstance(getattr(t.annotations, hint, None), bool):
                 problems.append(f"{t.name} does not set {hint}")
+        if t.annotations and t.annotations.read_only_hint and t.annotations.destructive_hint:
+            problems.append(f"{t.name} is both read-only and destructive")
         for arg, spec in (t.parameters.get("properties") or {}).items():
             if not spec.get("description"):
                 problems.append(f"{t.name} argument {arg} has no description")

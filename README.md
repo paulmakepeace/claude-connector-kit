@@ -95,7 +95,16 @@ hints on every tool, a description on every argument, and an output schema.
   `-> Annotated[CallToolResult, Model]`. `-> dict`, `-> CallToolResult` and no
   annotation give none.
 - `check_server(server, no_output=())` returns what is missing, one string per
-  gap. Hold a server to it in a test: `assert check_server(server) == []`.
+  gap: the server fields above, and per tool a title, a description within
+  Claude Code's 2,048-character cut, all four hints (not read-only and
+  destructive together), a description on every argument and an output schema.
+  Hold a server to it in a test: `assert check_server(server) == []`.
+
+What a linter also scores is the wording, which no check can judge. Say, in a
+tool's description, what it returns (the fields) and when to choose it over a
+neighbour; in an argument's, its meaning, unit, where an id comes from, any
+rule the schema cannot state, and what leaving an optional one out does. Do not
+restate an enum the schema already lists.
 
 ## Grants
 

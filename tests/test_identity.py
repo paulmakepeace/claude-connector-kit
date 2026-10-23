@@ -100,6 +100,31 @@ def test_an_icon_without_sizes_a_blank_title_and_a_tool_without_a_description_ar
     assert check_server(s) == ["server has no title", "an icon has no sizes", "mute has no description"]
 
 
+def test_a_missing_title_a_long_description_and_a_read_only_destructive_tool_are_caught():
+    s = conformant()
+    contradiction = ToolAnnotations(read_only_hint=True, destructive_hint=True, idempotent_hint=True,
+                                    open_world_hint=False)
+
+    @tool(s, "Both", contradiction)
+    def both(word: Annotated[str, about("the word")]) -> Annotated[CallToolResult, Word]:
+        """Both."""
+        return result({"word": word})
+
+    @s.tool(annotations=READS)
+    def untitled(word: Annotated[str, about("the word")]) -> Annotated[CallToolResult, Word]:
+        """Untitled."""
+        return result({"word": word})
+
+    def long(word: Annotated[str, about("the word")]) -> Annotated[CallToolResult, Word]:
+        return result({"word": word})
+    long.__doc__ = "x" * 2049
+    tool(s, "Long", READS)(long)
+    assert check_server(s) == [
+        "both is both read-only and destructive",
+        "untitled has no title",
+        "long description is 2049 characters, and Claude Code cuts it at 2048"]
+
+
 def test_an_exemption_for_a_tool_that_is_not_there_is_reported():
     assert check_server(conformant(), no_output=["gone"]) == ["no_output names gone, which is not a tool"]
 
