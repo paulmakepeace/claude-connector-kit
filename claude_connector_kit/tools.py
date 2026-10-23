@@ -1,15 +1,16 @@
 """Tools shaped for what a Claude client shows the model.
 
 A Claude client puts a tool's name, description and input schema before the
-model, and nothing else: no output schema, no title, no annotations, and on
-claude.ai no server instructions. The desktop app's Code and Cowork tabs strip
-an optional argument written `anyOf: [X, null]`, type and all. So:
+model. Whether it also shows the output schema is unverified (a client may
+not), and it shows no title, no annotations, and on claude.ai no server
+instructions. The desktop app's Code and Cowork tabs strip an optional
+argument written `anyOf: [X, null]`, type and all. So:
 
 - `tool()` registers a function with its title and hints, publishes its input
-  schema lean (no generated titles, an optional argument as its plain type),
-  refuses an argument the tool does not take, and hands the client the message
-  of each exception named in `errors` instead of the SDK's bare "Error
-  executing tool".
+  and output schemas lean (no generated titles, an optional argument as its
+  plain type, every description kept), refuses an argument the tool does not
+  take, and hands the client the message of each exception named in `errors`
+  instead of the SDK's bare "Error executing tool".
 - `about()` puts a description on an argument, where every client shows it.
 - `result()` returns data as compact JSON text and the same data structured,
   instead of the SDK's indent-2 text, which costs the model a token per space.
@@ -78,31 +79,31 @@ def tool(server: MCPServer, title: str, annotations: ToolAnnotations,
         server.tool(title=title, annotations=annotations)(wrapped)
         t = server._tool_manager.get_tool(fn.__name__)
         t.description = " ".join((t.description or "").split())
-        t.parameters = lean(t.parameters, prose=True)
+        t.parameters = lean(t.parameters)
         if t.fn_metadata.output_schema is not None:
-            t.fn_metadata.output_schema = lean(t.fn_metadata.output_schema, prose=False)
+            t.fn_metadata.output_schema = lean(t.fn_metadata.output_schema)
         refuse_unknown_arguments(server, fn.__name__)
         return wrapped
     return register
 
 
-def lean(node: Any, *, prose: bool) -> Any:
-    """A published schema without what a client does not use: the titles pydantic adds, an
-    optional argument's null choice and null default (leaving it out says the same), and,
-    unless `prose`, every description. Checks run on the tool's own models, not on this
-    copy, so it changes what is sent and nothing that is enforced."""
+def lean(node: Any) -> Any:
+    """A published schema without what a client does not use: the titles pydantic adds and an
+    optional argument's null choice and null default (leaving it out says the same).
+    Descriptions stay. Checks run on the tool's own models, not on this copy, so it changes
+    what is sent and nothing that is enforced."""
     if isinstance(node, list):
-        return [lean(item, prose=prose) for item in node]
+        return [lean(item) for item in node]
     if not isinstance(node, dict):
         return node
     out: dict[str, Any] = {}
     for key, value in node.items():
         if key in ("properties", "$defs"):   # keys here are field names, one may be "title"
-            out[key] = {name: lean(sub, prose=prose) for name, sub in value.items()}
-        elif key == "title" or (key == "description" and not prose):
+            out[key] = {name: lean(sub) for name, sub in value.items()}
+        elif key == "title":
             continue
         else:
-            out[key] = lean(value, prose=prose)
+            out[key] = lean(value)
     choices = out.get("anyOf")
     if isinstance(choices, list) and {"type": "null"} in choices and "default" in out \
             and out["default"] is None:

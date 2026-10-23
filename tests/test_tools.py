@@ -1,10 +1,12 @@
 import asyncio
 import json
-from typing import Annotated
+from typing import Annotated, TypedDict
 
 import pytest
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult
+from pydantic import BaseModel, Field
 
 from claude_connector_kit import READS, about, model_view, result, tool
 
@@ -90,3 +92,46 @@ def test_bounds_on_an_argument_are_published_and_enforced():
         "type": "integer", "description": "how many", "minimum": 1, "maximum": 10, "default": 5}
     with pytest.raises(ToolError):
         run(s.call_tool("bounded", {"limit": 0}))
+
+
+class Reading(TypedDict):
+    value: Annotated[int, Field(description="the measured value")]
+    unit: Annotated[str | None, Field(description="its unit")]
+
+
+class Pair(BaseModel):
+    left: Reading = Field(description="the first reading")
+
+
+def output_schema(server, name):
+    return server._tool_manager.get_tool(name).fn_metadata.output_schema
+
+
+def test_output_schema_descriptions_are_published_without_titles():
+    s = MCPServer("o")
+
+    @tool(s, "Pair", READS)
+    def pair(side: Annotated[str, about("which side")]) -> Annotated[CallToolResult, Pair]:
+        """A pair."""
+        return result({"left": {"value": 1, "unit": None}})
+    out = output_schema(s, "pair")
+    text = json.dumps(out)
+    assert out["properties"]["left"]["description"] == "the first reading"
+    reading = out["$defs"]["Reading"]["properties"]
+    assert reading["value"]["description"] == "the measured value"
+    assert reading["unit"]["description"] == "its unit"
+    assert '"title"' not in text
+    assert model_view(s)[0]["input_schema"]["properties"]["side"] == {
+        "type": "string", "description": "which side"}
+
+
+def test_a_typeddict_return_publishes_its_field_descriptions():
+    s = MCPServer("o")
+
+    @tool(s, "Read", READS)
+    def read() -> Reading:
+        """A reading."""
+        return {"value": 1, "unit": "mm"}
+    props = output_schema(s, "read")["properties"]
+    assert props["value"]["description"] == "the measured value"
+    assert "title" not in json.dumps(props)
