@@ -29,12 +29,18 @@ desktop app's Code and Cowork tabs strip an optional argument written
 ## Use
 
 ```python
-from typing import Annotated
+from typing import Annotated, TypedDict
 from mcp.server.mcpserver import MCPServer
+from mcp.types import CallToolResult
 from claude_connector_kit import (READS, LoginRefused, Provider, Store, about, add_login,
-                                  auth_settings, result, tool)
+                                  auth_settings, result, server_identity, tool)
 
 URL, SCOPES = "https://thing.example.com", ["read"]
+ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"><rect width="128" height="128"/></svg>'
+
+class Widgets(TypedDict):
+    columns: list[str]
+    rows: list[list]
 
 def check_login(login, password):
     if password != PASSWORD:
@@ -42,11 +48,14 @@ def check_login(login, password):
     return "signed-in"          # kept as the session; a backend token for a real login
 
 provider = Provider(Store("/data/oauth.db"), URL, check_login, SCOPES)
-server = MCPServer("thing", auth_server_provider=provider, auth=auth_settings(URL, SCOPES))
+server = MCPServer("thing", auth_server_provider=provider, auth=auth_settings(URL, SCOPES),
+                   **server_identity("Thing", "Lists the widgets a person has made.", "1.0.0",
+                                     ICON_SVG, website_url=URL))
 add_login(server, provider, what="thing", fixed_login="owner")   # password only, one person
 
 @tool(server, "Widgets", READS, errors=(ValueError,))
-def widgets(since: Annotated[str | None, about("from this date, YYYY-MM-DD")] = None):
+def widgets(since: Annotated[str | None, about("from this date, YYYY-MM-DD")] = None
+            ) -> Annotated[CallToolResult, Widgets]:
     """Widgets made since a date, newest first."""
     return result({"columns": ["id", "made"], "rows": [[1, "2026-09-29"]]})
 
@@ -68,6 +77,25 @@ token = sign_in("https://thing.example.com/mcp", password)
 
 `model_view(server)` returns what a client shows the model, for a test that
 holds the tool list to a budget.
+
+## What a connector directory asks for
+
+A title, description, version, website and icon on the server, all four boolean
+hints on every tool, a description on every argument, and an output schema.
+
+- `server_identity(title, description, version, icon_svg, website_url=...)` is
+  the `MCPServer` keyword arguments for the first group; `website_url` is left
+  out when None, so a build with no public address can pass it elsewhere.
+  The version is the caller's: the kit only checks it is not empty.
+- `READS` sets all four hints for a tool that only reads; `writes()` for one
+  that does not.
+- `landing_html(title, summary, *notes)` and `landing_route(page)` give the
+  website a page. Put the route before the mount that serves `/mcp`.
+- A tool has an output schema when it is annotated `-> str`, `-> list[Model]` or
+  `-> Annotated[CallToolResult, Model]`. `-> dict`, `-> CallToolResult` and no
+  annotation give none.
+- `check_server(server, no_output=())` returns what is missing, one string per
+  gap. Hold a server to it in a test: `assert check_server(server) == []`.
 
 ## Grants
 

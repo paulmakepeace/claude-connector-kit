@@ -28,8 +28,10 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import ConfigDict, Field
 
-# The hints a client reads to decide whether to ask the person before a call.
-READS = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+# The hints a client reads to decide whether to ask the person before a call. A client that
+# finds one unset has to assume the worst, so a read sets all four.
+READS = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True,
+                        open_world_hint=False)
 
 
 def writes(*, destructive: bool, idempotent: bool) -> ToolAnnotations:
