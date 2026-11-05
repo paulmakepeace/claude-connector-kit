@@ -11,10 +11,12 @@ its own.
 ## What a Claude client shows the model
 
 A tool's name, description and input schema. Not its title or annotations; on
-claude.ai, not the server's instructions either. Whether it shows the output
-schema to the model is unverified and to be re-tested: a client may not, so
-what a field means for the model belongs in the tool description. The desktop
-app's Code and Cowork tabs strip an optional argument written
+claude.ai, not the server's instructions either. Nor, in the two clients
+checked, the output schema: in the desktop app's Code tab and in Claude's Chat
+the tool definition the model receives has no output schema, so what a field
+means for the model belongs in the tool description. The desktop app's Cowork
+tab, the Claude Code CLI and the phone apps have not been checked for this. The
+desktop app's Code and Cowork tabs strip an optional argument written
 `anyOf: [X, null]`, type and enum included. Claude Code cuts a description at
 2,048 characters and warns at a 10,000-token result. So the kit:
 
@@ -22,7 +24,8 @@ app's Code and Cowork tabs strip an optional argument written
   as its plain type, `additionalProperties: false`, and an argument the tool
   does not take is refused rather than silently dropped;
 - publishes each output schema with its descriptions (`Field(description=...)`)
-  and without generated titles, for the clients that do read it;
+  and without generated titles, for the other readers of a published schema,
+  such as directory scanners;
 - puts guidance on arguments (`about()`), where every client shows it, rather
   than in instructions, which some drop;
 - returns results as compact JSON (`result()`); the SDK's default is indent 2,

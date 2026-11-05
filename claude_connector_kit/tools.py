@@ -1,10 +1,11 @@
 """Tools shaped for what a Claude client shows the model.
 
 A Claude client puts a tool's name, description and input schema before the
-model. Whether it also shows the output schema is unverified (a client may
-not), and it shows no title, no annotations, and on claude.ai no server
-instructions. The desktop app's Code and Cowork tabs strip an optional
-argument written `anyOf: [X, null]`, type and all. So:
+model. It shows no title, no annotations, and on claude.ai no server
+instructions. The desktop app's Code tab and Claude's Chat show no output
+schema either (the other clients are unchecked). The desktop app's Code and
+Cowork tabs strip an optional argument written `anyOf: [X, null]`, type and
+all. So:
 
 - `tool()` registers a function with its title and hints, publishes its input
   and output schemas lean (no generated titles, an optional argument as its
